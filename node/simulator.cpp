@@ -10,6 +10,8 @@
 #include <nav_msgs/OccupancyGrid.h>
 #include <nav_msgs/Odometry.h>
 #include <sensor_msgs/Imu.h>
+#include <std_msgs/Float32.h>
+#include <std_msgs/Bool.h>
 #include <std_msgs/Int32MultiArray.h>
 
 #include <sensor_msgs/LaserScan.h>
@@ -25,6 +27,7 @@
 #include "f1tenth_simulator/car_params.hpp"
 #include "f1tenth_simulator/ks_kinematics.hpp"
 #include "f1tenth_simulator/st_kinematics.hpp"
+#include "f1tenth_simulator/std_kinematics.hpp"
 #include "f1tenth_simulator/precompute.hpp"
 
 #include <iostream>
@@ -53,13 +56,17 @@ private:
     // The car state and parameters
     CarState state;
     double previous_seconds;
+    double previous_velocity;
     double scan_distance_to_base_link;
     double max_speed, max_steering_angle;
     double max_accel, max_steering_vel, max_decel;
-    double desired_speed, desired_steer_ang;
-    double accel, steer_angle_vel;
+    double desired_speed, desired_steer_ang, desired_accel;
+    double accel_x, accel_y, steer_angle_vel;
     CarParams params;
     double width;
+
+    // define a pointer to a function that returns a CarState
+    CarState (*dynamic)(const CarState, double, double, CarParams, double);
 
     // A simulator of the laser
     ScanSimulator2D scan_simulator;
@@ -82,13 +89,16 @@ private:
     ros::Subscriber pose_sub;
     ros::Subscriber pose_rviz_sub;
 
-    // Publish a scan, odometry, and imu data
+    // Publish a scan, odometry, pitch, and imu data
     bool broadcast_transform;
     bool pub_gt_pose;
+    ros::Publisher collision_pub;
     ros::Publisher scan_pub;
     ros::Publisher pose_pub;
     ros::Publisher odom_pub;
     ros::Publisher imu_pub;
+    ros::Publisher pitch_pub;
+    ros::Publisher slip_angle_pub;
 
     // publisher for map with obstacles
     ros::Publisher map_pub;
@@ -134,16 +144,23 @@ public:
         n = ros::NodeHandle("~");
 
         // Initialize car state and driving commands
-        state = {.x=0, .y=0, .theta=0, .velocity=0, .steer_angle=0.0, .angular_velocity=0.0, .slip_angle=0.0, .st_dyn=false};
-        accel = 0.0;
+        double x0, y0, theta0;
+        n.getParam("car_init_x", x0);
+        n.getParam("car_init_y", y0);
+        n.getParam("car_init_theta", theta0);
+        state = {.x=x0, .y=y0, .theta=theta0, .velocity=0, .steer_angle=0.0, .angular_velocity=0.0, .slip_angle=0.0, .st_dyn=false};
+        accel_x = 0.0;
+        accel_y = 0.0;
         steer_angle_vel = 0.0;
         desired_speed = 0.0;
         desired_steer_ang = 0.0;
+        desired_accel = 0.0;
         previous_seconds = ros::Time::now().toSec();
+        previous_velocity = 0.0;
 
         // Get the topic names
         std::string drive_topic, map_topic, scan_topic, pose_topic, gt_pose_topic, 
-        pose_rviz_topic, odom_topic, imu_topic;
+        pose_rviz_topic, odom_topic, imu_topic, pitch_topic;
         n.getParam("drive_topic", drive_topic);
         n.getParam("map_topic", map_topic);
         n.getParam("scan_topic", scan_topic);
@@ -151,6 +168,7 @@ public:
         n.getParam("odom_topic", odom_topic);
         n.getParam("pose_rviz_topic", pose_rviz_topic);
         n.getParam("imu_topic", imu_topic);
+        n.getParam("pitch_topic", pitch_topic);
         n.getParam("ground_truth_pose_topic", gt_pose_topic);
 
         // Get steering delay params
@@ -164,7 +182,6 @@ public:
         // Fetch the car parameters
         int scan_beams;
         double update_pose_rate, scan_std_dev;
-        n.getParam("wheelbase", params.wheelbase);
         n.getParam("update_pose_rate", update_pose_rate);
         n.getParam("scan_beams", scan_beams);
         n.getParam("scan_field_of_view", scan_fov);
@@ -173,18 +190,46 @@ public:
         n.getParam("scan_distance_to_base_link", scan_distance_to_base_link);
         n.getParam("max_speed", max_speed);
         n.getParam("max_steering_angle", max_steering_angle);
-        n.getParam("max_accel", max_accel);
-        n.getParam("max_decel", max_decel);
         n.getParam("max_steering_vel", max_steering_vel);
         n.getParam("friction_coeff", params.friction_coeff);
-        n.getParam("height_cg", params.h_cg);
-        n.getParam("l_cg2rear", params.l_r);
-        n.getParam("l_cg2front", params.l_f);
-        n.getParam("C_S_front", params.cs_f);
-        n.getParam("C_S_rear", params.cs_r);
-        n.getParam("moment_inertia", params.I_z);
-        n.getParam("mass", params.mass);
         n.getParam("width", width);
+
+        // models from sysid
+        n.getParam("/model_params/l_wb", params.wheelbase);
+        n.getParam("/model_params/a_max", max_accel);
+        n.getParam("/model_params/a_min", max_decel);
+        max_decel = std::abs(max_decel); // since we have the min accel in the yaml
+        n.getParam("/model_params/h_cg", params.h_cg);
+        n.getParam("/model_params/l_r", params.l_r);
+        n.getParam("/model_params/l_f", params.l_f);
+        n.getParam("/model_params/I_z", params.I_z);
+        n.getParam("/model_params/m", params.mass);
+        n.getParam("/tire_model", params.tire_model);
+
+        if (params.tire_model == "pacejka") {
+            // create array for pacejka params
+            std::vector<double> pacejka_front, pacejka_rear;
+            n.getParam("/model_params/C_Pr", pacejka_rear);
+            n.getParam("/model_params/C_Pf", pacejka_front);
+            params.B_r = pacejka_rear[0]; 
+            params.C_r = pacejka_rear[1];
+            params.D_r = pacejka_rear[2];
+            params.E_r = pacejka_rear[3];
+            params.B_f = pacejka_front[0];
+            params.C_f = pacejka_front[1];
+            params.D_f = pacejka_front[2];
+            params.E_f = pacejka_front[3];
+
+            dynamic = STDKinematics::update_pacejka;
+        } else if (params.tire_model == "linear") {
+            // these are for linear tire dynamics
+            n.getParam("/model_params/C_Sf", params.cs_f);
+            n.getParam("/model_params/C_Sr", params.cs_r);
+
+            dynamic = STDKinematics::update_linear;
+        } else {
+            ROS_INFO("Invalid tire model. Please choose either pacejka or linear.");
+        }
 
         // clip velocity
         n.getParam("speed_clip_diff", speed_clip_diff);
@@ -202,6 +247,9 @@ public:
             scan_fov,
             scan_std_dev);
 
+        // Make a publisher for collision messages
+        collision_pub = n.advertise<std_msgs::Bool>("/wall_collision", 1);
+
         // Make a publisher for laser scan messages
         scan_pub = n.advertise<sensor_msgs::LaserScan>(scan_topic, 1);
 
@@ -210,6 +258,12 @@ public:
 
         // Make a publisher for IMU messages
         imu_pub = n.advertise<sensor_msgs::Imu>(imu_topic, 1);
+
+        // Make a publisher for pitch messages
+        pitch_pub = n.advertise<std_msgs::Float32>(pitch_topic, 1);
+
+        // Make a publisher for publishing the slip angle
+        slip_angle_pub = n.advertise<std_msgs::Float32>("/slip_angle", 1);
 
         // Make a publisher for publishing map with obstacles
         map_pub = n.advertise<nav_msgs::OccupancyGrid>("/map", 1);
@@ -306,7 +360,7 @@ public:
     void update_pose(const ros::TimerEvent&) {
 
         // simulate P controller
-        compute_accel(desired_speed);
+        compute_accel(desired_speed, desired_accel);
         double actual_ang = 0.0;
         if (steering_buffer.size() < buffer_length) {
             steering_buffer.push_back(desired_steer_ang);
@@ -321,16 +375,21 @@ public:
         // Update the pose
         ros::Time timestamp = ros::Time::now();
         double current_seconds = timestamp.toSec();
-        state = STKinematics::update(
+        state = dynamic( 
             state,
-            accel,
+            accel_x,
             steer_angle_vel,
             params,
             current_seconds - previous_seconds);
         state.velocity = std::min(std::max(state.velocity, -max_speed), max_speed);
         state.steer_angle = std::min(std::max(state.steer_angle, -max_steering_angle), max_steering_angle);
+        
+        double v_y = state.velocity * std::sin(state.slip_angle);
+        double v_x = state.velocity * std::cos(state.slip_angle);
+        accel_y = (previous_velocity - v_y) / (current_seconds - previous_seconds) + v_x * state.angular_velocity;
 
         previous_seconds = current_seconds;
+        previous_velocity = v_y;
 
         /// Publish the pose as a transformation
         pub_pose_transform(timestamp);
@@ -344,6 +403,11 @@ public:
         // TODO: make and publish IMU message
         pub_imu(timestamp);
 
+        // Publish zero pitch message
+        pub_pitch();
+
+        // TODO publish slip angle and other important messages
+        pub_slip_angle();
 
         /// KEEP in sim
         // If we have a map, perform a scan
@@ -387,9 +451,16 @@ public:
                 }
             }
 
-            // reset TTC
-            if (no_collision)
+            // reset TTC and publish collision bool
+            std_msgs::Bool coll_msg;
+            if (no_collision){
                 TTC = false;
+                coll_msg.data = false;
+            }
+            else{
+                coll_msg.data = true;
+            }
+            collision_pub.publish(coll_msg);
 
             // Publish the laser message
             sensor_msgs::LaserScan scan_msg;
@@ -443,13 +514,14 @@ public:
         state.slip_angle = 0.0;
         state.steer_angle = 0.0;
         steer_angle_vel = 0.0;
-        accel = 0.0;
+        accel_x = 0.0;
+        accel_y = 0.0;
         desired_speed = 0.0;
         desired_steer_ang = 0.0;
     }
 
     void set_accel(double accel_) {
-        accel = std::min(std::max(accel_, -max_accel), max_accel);
+        accel_x = std::min(std::max(accel_, -max_accel), max_accel);
     }
 
     void set_steer_angle_vel(double steer_angle_vel_) {
@@ -498,23 +570,25 @@ public:
         return steer_vel;
     }
 
-    void compute_accel(double desired_velocity) {
+    void compute_accel(double desired_velocity, double desired_accel) {
         // get difference between current and desired
         double dif = (desired_velocity - state.velocity);
-
-        if (state.velocity > 0) {
+        if(desired_accel != 0){
+            set_accel(desired_accel);
+            return;
+        } else if (state.velocity > 0) {
             if (dif > 0) {
                 // accelerate
                 double kp = 2.0 * max_accel / max_speed;
                 set_accel(kp * dif);
             } else {
                 // brake
-                accel = -max_decel; 
+                accel_x = -max_decel; 
             }    
         } else if (state.velocity < 0) {
             if (dif > 0) {
                 // brake
-                accel = max_decel;
+                accel_x = max_decel;
 
             } else {
                 // accelerate
@@ -545,6 +619,10 @@ public:
         geometry_msgs::Quaternion q = msg.pose.orientation;
         tf2::Quaternion quat(q.x, q.y, q.z, q.w);
         state.theta = tf2::impl::getYaw(quat);
+        state.velocity = 0.0;
+        state.steer_angle = 0.0;
+        state.angular_velocity = 0.0;
+        state.slip_angle = 0.0;
     }
 
     void pose_rviz_callback(const geometry_msgs::PoseWithCovarianceStamped::ConstPtr & msg) {
@@ -557,6 +635,7 @@ public:
     void drive_callback(const ackermann_msgs::AckermannDriveStamped & msg) {
         desired_speed = msg.drive.speed;
         desired_steer_ang = msg.drive.steering_angle;
+        desired_accel = msg.drive.acceleration;
     }
 
     // button callbacks
@@ -703,9 +782,27 @@ public:
             sensor_msgs::Imu imu;
             imu.header.stamp = timestamp;
             imu.header.frame_id = map_frame;
-
+            
+            imu.linear_acceleration.y = accel_y;
+            imu.linear_acceleration.x = accel_x * std::cos(state.slip_angle);
 
             imu_pub.publish(imu);
+        }
+
+        void pub_pitch() {
+            // Make Float32 with empty pitch message and publish it
+            std_msgs::Float32 pitch;
+            pitch.data = 0.0;
+
+            pitch_pub.publish(pitch);
+        }
+
+        void pub_slip_angle() {
+            // Make Float32 with empty pitch message and publish it
+            std_msgs::Float32 slip_angle;
+            slip_angle.data = state.slip_angle;
+
+            slip_angle_pub.publish(slip_angle);
         }
 
 };

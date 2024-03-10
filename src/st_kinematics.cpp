@@ -17,7 +17,7 @@ CarState STKinematics::update(
         double dt) {
 
 
-    double thresh = .5; // cut off to avoid singular behavior
+    double thresh = 2; // cut off to avoid singular behavior
     double err = .03; // deadband to avoid flip flop
     if (!start.st_dyn)
         thresh += err;
@@ -94,14 +94,16 @@ CarState STKinematics::update_k(
     CarState end;
 
     // compute first derivatives of state
-    double x_dot = start.velocity * std::cos(start.theta);
-    double y_dot = start.velocity * std::sin(start.theta);
+    double x_dot = start.velocity * std::cos(start.theta + start.slip_angle);
+    double y_dot = start.velocity * std::sin(start.theta + start.slip_angle);
     double v_dot = accel;
     double steer_angle_dot = steer_angle_vel;
-    double theta_dot = start.velocity / p.wheelbase * std::tan(start.steer_angle);
-    double theta_double_dot = accel / p.wheelbase * std::tan(start.steer_angle) +
-            start.velocity * steer_angle_vel / (p.wheelbase * std::pow(std::cos(start.steer_angle), 2));
-    double slip_angle_dot = 0;
+    double theta_dot = start.velocity * std::tan(start.steer_angle) * std::cos(start.slip_angle)/ p.wheelbase ;
+    double slip_angle_dot = (1 / (1 + std::pow(((p.l_r/p.wheelbase) * std::tan(start.steer_angle)), 2))) *
+            (p.l_r / (p.wheelbase * std::pow(std::cos(start.steer_angle), 2))) * steer_angle_vel;
+    double theta_double_dot = accel * std::tan(start.steer_angle) * std::cos(start.slip_angle)/ p.wheelbase  +
+            start.velocity * steer_angle_vel * std::cos(start.slip_angle) / (p.wheelbase * std::pow(std::cos(start.steer_angle), 2)) -
+            start.velocity * std::sin(start.slip_angle) * std::tan(start.steer_angle) * slip_angle_dot / p.wheelbase;
 
     // update state
     end.x = start.x + x_dot * dt;
@@ -109,8 +111,8 @@ CarState STKinematics::update_k(
     end.theta = start.theta + theta_dot * dt;
     end.velocity = start.velocity + v_dot * dt;
     end.steer_angle = start.steer_angle + steer_angle_dot * dt;
-    end.angular_velocity = 0; //start.angular_velocity + theta_double_dot * dt;
-    end.slip_angle = 0; //start.slip_angle + slip_angle_dot * dt;
+    end.angular_velocity = start.angular_velocity + theta_double_dot * dt;
+    end.slip_angle = start.slip_angle + slip_angle_dot * dt;
     end.st_dyn = false;
 
 

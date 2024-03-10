@@ -172,7 +172,8 @@ public:
         n.getParam("collision_file", filename);
         collision_file.open(ros::package::getPath("f1tenth_simulator") + "/logs/" + filename + ".txt");
         beginning_seconds = ros::Time::now().toSec();
-
+        
+        //toggle_mux(nav_mux_idx, "Navigation");
     }
 
     /// ---------------------- GENERAL HELPER FUNCTIONS ----------------------
