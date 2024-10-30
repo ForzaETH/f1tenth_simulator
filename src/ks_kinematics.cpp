@@ -18,20 +18,22 @@ CarState KSKinematics::update(
     CarState end;
 
     // compute first derivatives of state
-    double x_dot = start.velocity * std::cos(start.theta);
-    double y_dot = start.velocity * std::sin(start.theta);
-    double v_dot = accel;
+    double x_dot = start.v_x * std::cos(start.theta) - start.v_y * std::sin(start.theta);
+    double y_dot = start.v_x * std::sin(start.theta) + start.v_y * std::cos(start.theta);
+    double vx_dot = accel;
+    double vy_dot = 0; // Change if lateral velocity is considered
     double steer_ang_dot = steer_angle_vel;
-    double theta_dot = start.velocity / p.wheelbase * std::tan(start.steer_angle);
+    double theta_dot = start.v_x / p.wheelbase * std::tan(start.steer_angle);
 
     // update state
     end.x = start.x + x_dot * dt;
     end.y = start.y + y_dot * dt;
     end.theta = start.theta + theta_dot * dt;
-    end.velocity = start.velocity + v_dot * dt;
+    end.v_x = start.v_x + vx_dot * dt;
+    end.v_y = start.v_y + vy_dot * dt;
     end.steer_angle = start.steer_angle + steer_ang_dot * dt;
     end.angular_velocity = start.angular_velocity;
-    end.slip_angle = start.slip_angle;
+    end.slip_angle = std::atan2(end.v_y, end.v_x);
 
     return end;
 }

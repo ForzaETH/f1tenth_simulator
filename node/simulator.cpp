@@ -99,6 +99,8 @@ private:
     ros::Publisher imu_pub;
     ros::Publisher pitch_pub;
     ros::Publisher slip_angle_pub;
+    ros::Publisher steer_angle_pub;
+    ros::Publisher steer_pub;
 
     // publisher for map with obstacles
     ros::Publisher map_pub;
@@ -148,7 +150,7 @@ public:
         n.getParam("car_init_x", x0);
         n.getParam("car_init_y", y0);
         n.getParam("car_init_theta", theta0);
-        state = {.x=x0, .y=y0, .theta=theta0, .velocity=0, .steer_angle=0.0, .angular_velocity=0.0, .slip_angle=0.0, .st_dyn=false};
+        state = {.x=x0, .y=y0, .theta=theta0, .v_x=0, .v_y=0, .steer_angle=0.0, .angular_velocity=0.0, .slip_angle=0.0, .st_dyn=false};
         accel_x = 0.0;
         accel_y = 0.0;
         steer_angle_vel = 0.0;
@@ -263,7 +265,10 @@ public:
         pitch_pub = n.advertise<std_msgs::Float32>(pitch_topic, 1);
 
         // Make a publisher for publishing the slip angle
-        slip_angle_pub = n.advertise<std_msgs::Float32>("/slip_angle", 1);
+        slip_angle_pub = n.advertise<std_msgs::Float32>("/slip_angle_gt", 1);
+
+        // Make a publisher for publishing the slip angle
+        steer_angle_pub = n.advertise<std_msgs::Float32>("/car_state/steering_angle_gt", 1);
 
         // Make a publisher for publishing map with obstacles
         map_pub = n.advertise<nav_msgs::OccupancyGrid>("/map", 1);
@@ -381,13 +386,12 @@ public:
             steer_angle_vel,
             params,
             current_seconds - previous_seconds);
-        state.velocity = std::min(std::max(state.velocity, -max_speed), max_speed);
+        state.v_x = std::min(std::max(state.v_x, -max_speed), max_speed);
         state.steer_angle = std::min(std::max(state.steer_angle, -max_steering_angle), max_steering_angle);
         
-        double v_y = state.velocity * std::sin(state.slip_angle);
-        double v_x = state.velocity * std::cos(state.slip_angle);
+        double v_y = state.v_y;
+        double v_x = state.v_x;
         accel_y = (previous_velocity - v_y) / (current_seconds - previous_seconds) + v_x * state.angular_velocity;
-
         previous_seconds = current_seconds;
         previous_velocity = v_y;
 
@@ -408,6 +412,8 @@ public:
 
         // TODO publish slip angle and other important messages
         pub_slip_angle();
+        pub_steer_angle();
+
 
         /// KEEP in sim
         // If we have a map, perform a scan
@@ -430,12 +436,13 @@ public:
             // TTC Calculations are done here so the car can be halted in the simulator:
             // to reset TTC
             bool no_collision = true;
-            if (state.velocity != 0) {
+            double velocity = std::sqrt(std::pow(state.v_x, 2) + std::pow(state.v_y, 2));
+            if (velocity != 0) {
                 for (size_t i = 0; i < scan_.size(); i++) {
                     // TTC calculations
 
                     // calculate projected velocity
-                    double proj_velocity = state.velocity * cosines[i];
+                    double proj_velocity = velocity * cosines[i];
                     double ttc = (scan_[i] - car_distances[i]) / proj_velocity;
                     // if it's small enough to count as a collision
                     if ((ttc < ttc_threshold) && (ttc >= 0.0)) { 
@@ -509,7 +516,8 @@ public:
 
     void first_ttc_actions() {
         // completely stop vehicle
-        state.velocity = 0.0;
+        state.v_x = 0.0;
+        state.v_y = 0.0;
         state.angular_velocity = 0.0;
         state.slip_angle = 0.0;
         state.steer_angle = 0.0;
@@ -572,11 +580,11 @@ public:
 
     void compute_accel(double desired_velocity, double desired_accel) {
         // get difference between current and desired
-        double dif = (desired_velocity - state.velocity);
+        double dif = (desired_velocity - state.v_x);
         if(desired_accel != 0){
             set_accel(desired_accel);
             return;
-        } else if (state.velocity > 0) {
+        } else if (state.v_x > 0) {
             if (dif > 0) {
                 // accelerate
                 double kp = 2.0 * max_accel / max_speed;
@@ -585,7 +593,7 @@ public:
                 // brake
                 accel_x = -max_decel; 
             }    
-        } else if (state.velocity < 0) {
+        } else if (state.v_x < 0) {
             if (dif > 0) {
                 // brake
                 accel_x = max_decel;
@@ -619,7 +627,8 @@ public:
         geometry_msgs::Quaternion q = msg.pose.orientation;
         tf2::Quaternion quat(q.x, q.y, q.z, q.w);
         state.theta = tf2::impl::getYaw(quat);
-        state.velocity = 0.0;
+        state.v_x = 0.0;
+        state.v_y = 0.0;
         state.steer_angle = 0.0;
         state.angular_velocity = 0.0;
         state.slip_angle = 0.0;
@@ -771,7 +780,8 @@ public:
             odom.pose.pose.orientation.y = quat.y();
             odom.pose.pose.orientation.z = quat.z();
             odom.pose.pose.orientation.w = quat.w();
-            odom.twist.twist.linear.x = state.velocity;
+            odom.twist.twist.linear.x = state.v_x;
+            odom.twist.twist.linear.y = state.v_y;
             odom.twist.twist.angular.z = state.angular_velocity;
             odom_pub.publish(odom);
         }
@@ -784,7 +794,7 @@ public:
             imu.header.frame_id = map_frame;
             
             imu.linear_acceleration.y = accel_y;
-            imu.linear_acceleration.x = accel_x * std::cos(state.slip_angle);
+            imu.linear_acceleration.x = accel_x;
 
             imu_pub.publish(imu);
         }
@@ -803,6 +813,12 @@ public:
             slip_angle.data = state.slip_angle;
 
             slip_angle_pub.publish(slip_angle);
+        }
+
+        void pub_steer_angle(){
+            std_msgs::Float32 steer_angle;
+            steer_angle.data = state.steer_angle;
+            steer_angle_pub.publish(steer_angle);
         }
 
 };

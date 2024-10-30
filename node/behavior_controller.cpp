@@ -106,7 +106,7 @@ public:
         // Start subscribers to listen to laser scan, joy, IMU, and odom messages
         laser_sub = n.subscribe(scan_topic, 1, &BehaviorController::laser_callback, this);
         joy_sub = n.subscribe(joy_topic, 1, &BehaviorController::joy_callback, this);
-        imu_sub = n.subscribe(imu_topic, 1, &BehaviorController::imu_callback, this);
+        // imu_sub = n.subscribe(imu_topic, 1, &BehaviorController::imu_callback, this); // not used, was giving warning in build
         odom_sub = n.subscribe(odom_topic, 1, &BehaviorController::odom_callback, this);
         key_sub = n.subscribe(keyboard_topic, 1, &BehaviorController::key_callback, this);
         brake_bool_sub = n.subscribe(brake_bool_topic, 1, &BehaviorController::brake_callback, this);
@@ -149,7 +149,7 @@ public:
         safety_on = false;
 
         // Initialize state
-        state = {.x=0.0, .y=0.0, .theta=0.0, .velocity=0.0, .steer_angle=0.0, .angular_velocity=0.0, .slip_angle=0.0, .st_dyn=false};
+        state = {.x=0.0, .y=0.0, .theta=0.0, .v_x=0.0, .v_y=0.0, .steer_angle=0.0, .angular_velocity=0.0, .slip_angle=0.0, .st_dyn=false};
 
         // Get params for precomputation and collision detection
         int scan_beams;
@@ -206,12 +206,13 @@ public:
 
     void collision_checker(const sensor_msgs::LaserScan & msg) {
         // This function calculates TTC to see if there's a collision
-        if (state.velocity != 0) {
+        double velocity = std::sqrt(std::pow(state.v_x, 2) + std::pow(state.v_y, 2));
+        if (velocity != 0) {
             for (size_t i = 0; i < msg.ranges.size(); i++) {
                 double angle = msg.angle_min + i * msg.angle_increment;
 
                 // calculate projected velocity
-                double proj_velocity = state.velocity * cosines[i];
+                double proj_velocity = velocity * cosines[i];
                 double ttc = (msg.ranges[i] - car_distances[i]) / proj_velocity;
 
                 // if it's small, there's a collision
@@ -363,15 +364,16 @@ public:
 
     void odom_callback(const nav_msgs::Odometry & msg) {
         // Keep track of state to be used elsewhere
-        state.velocity = msg.twist.twist.linear.x;
+        state.v_x = msg.twist.twist.linear.x;
+        state.v_y = msg.twist.twist.linear.y;
         state.angular_velocity = msg.twist.twist.angular.z;
         state.x = msg.pose.pose.position.x;
         state.y = msg.pose.pose.position.y;
     }
 
-    void imu_callback(const sensor_msgs::Imu & msg) {
+    // void imu_callback(const sensor_msgs::Imu & msg) {
 
-    }
+    // }
 
 
 };
