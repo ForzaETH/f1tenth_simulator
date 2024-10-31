@@ -781,7 +781,7 @@ public:
             odom.pose.pose.orientation.z = quat.z();
             odom.pose.pose.orientation.w = quat.w();
             odom.twist.twist.linear.x = state.v_x;
-            odom.twist.twist.linear.y = state.v_y;
+            odom.twist.twist.linear.y = -state.v_y; //TODO: Fix vy in the dynamics instead
             odom.twist.twist.angular.z = state.angular_velocity;
             odom_pub.publish(odom);
         }
